@@ -52,7 +52,7 @@ from sqli_blind import SQLInjection
 
 with SQLInjection(
     url="http://127.0.0.1:{port}/Less-8/?id=1",  # 注入参数可手动传入，也可由脚本自动获取,将{port}改为实际端口，比如:8080
-    table_name="users",
+    table_name="users",                          #除了URL,其余参数有默认值，可指定也可自己手动传入
     columns=["username", "password"],
     prefix="-1'",
     suffix=" -- ",
