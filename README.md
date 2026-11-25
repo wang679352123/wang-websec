@@ -51,7 +51,7 @@ cd wang-websec
 from sqli_blind import SQLInjection
 
 with SQLInjection(
-    url="http://127.0.0.1:8082/Less-8/?id=1",  # 注入参数可手动传入，也可由脚本自动获取
+    url="http://127.0.0.1:{port}/Less-8/?id=1",  # 注入参数可手动传入，也可由脚本自动获取,将{port}改为实际端口，比如:8080
     table_name="users",
     columns=["username", "password"],
     prefix="-1'",
