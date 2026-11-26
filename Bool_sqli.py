@@ -23,6 +23,7 @@
     ) as tool:
         data = tool.run()      # 自动探测标志 + 二分猜解
         print(data)
+        会持续更新
 """
 
 import requests
