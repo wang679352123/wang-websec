@@ -6,23 +6,27 @@
 
 ## 项目简介
 
-把手工做 Web 漏洞练习时重复的步骤脚本化，目前包含一个**布尔盲注自动化**模块：
+把手工做 Web 漏洞练习时重复的步骤脚本化。目前包含：
 
-- 自动判定注入参数与判断标志
-- 二分查找逐字符猜解数据
-- 结果自动还原为 `{用户名: 密码}`
+- 一个公共底座（HTTP 请求、参数解析、判断标志探测）
+- 一个布尔盲注模块（二分猜解数据）
+- 一个列数探测模块（order by 二分）
 
-## 已实现
+## 功能模块
 
-| 模块 | 文件 | 说明 |
+| 文件 | 类 | 说明 |
 |---|---|---|
-| 布尔盲注 | `sqli_blind.py` | 支持 GET/POST、表单/JSON、自定义前缀/注释符/连接词 |
+| `sqli_blind.py` | `SQLInjection` | 公共底座：请求、参数、判断标志探测 |
+| `Bool_sqli.py` | `BoolSQLi` | 布尔盲注：二分猜解 + 结果还原 |
+| `time_bool.py` | `UnionInjection` | 列数探测：order by 二分 |
 
 ## 目录结构
 
 ```text
 wang-websec/
-├── sqli_blind.py   # 布尔盲注自动化
+├── sqli_blind.py   # 公共底座
+├── Bool_sqli.py    # 布尔盲注
+├── time_bool.py    # 列数探测（order by）
 ├── README.md
 └── LICENSE
 ```
@@ -32,7 +36,7 @@ wang-websec/
 - Python 3.8+
 - 第三方依赖：`requests`
 
-> `logging`、`re`、`threading` 属于 Python 标准库，无需安装。
+> `logging`、`re`、`threading`、`html` 属于 Python 标准库，无需安装。
 
 ```bash
 pip install requests
@@ -45,41 +49,42 @@ git clone https://github.com/wang679352123/wang-websec.git
 cd wang-websec
 ```
 
-### 示例 1：sqli-labs
+### 示例 1：布尔盲注（sqli-labs Less-8）
 
 ```python
-from sqli_blind import SQLInjection
+from Bool_sqli import BoolSQLi
 
-with SQLInjection(
-    url="http://127.0.0.1:{port}/Less-8/?id=1",  # 注入参数可手动传入，也可由脚本自动获取,将{port}改为实际端口，比如:8080
-    table_name="users",                          #除了URL,其余参数有默认值，可指定也可自己手动传入
+with BoolSQLi(
+    url="http://127.0.0.1:{port}/Less-8/?id=1",
+    table_name="users",
     columns=["username", "password"],
     prefix="-1'",
     suffix=" -- ",
     op="OR",
 ) as tool:
-    tool.detect_keyword()
-    data = tool.blind_sql()
+    data = tool.run()      # 自动探测判断标志 + 二分猜解
     print(data)
 ```
 
-### 示例 2：pikachu
+### 示例 2：列数探测（order by）
 
 ```python
-from sqli_blind import SQLInjection
+from time_bool import UnionInjection
 
-tool = SQLInjection(
-    url="http://127.0.0.1/pikachu/vul/sqli/sqli_blind_b.php",
-    params_name="name",
-    table_name="users",
-    columns=["username", "password"],
-    extra_params={"submit": "查询"},  # 需要额外提交的字段
-)
+g = UnionInjection(
+        "http://localhost:{port}/Less-11/?uname=&passwd&submit=Submit",
+        columns="password",
+        prefix="admin'",
+
+         op="or",
+         method="POST",
+         extra_params={"submit":"Submit","passwd":"admin"})
+    print("列数:", g.action())
 ```
 
-## 参数说明
+## 参数说明（公共底座）
 
-| 参数 | 示例 | 说明 |
+| 参数 | 默认值 | 说明 |
 |---|---|---|
 | `url` | 必填 | 目标地址 |
 | `method` | `"get"` | 请求方法：`get` / `post` |
@@ -98,25 +103,37 @@ tool = SQLInjection(
 
 ## 工作原理
 
-1. **判定注入点**：对每个参数发送 `1=1` 与 `1=2`，比较响应差异；
-2. **找判断标志**：真假各请求两次，取“两次真都有、两次假都没有”的稳定文本；
-3. **二分猜字符**：构造 `ascii(substr((select group_concat(列) from 表), 位置, 1)) > mid`，在 0~127 内折半；
-4. **还原结果**：按 `group_concat` 的逗号、`concat_ws` 的冒号拆分为字典。
+### 公共底座
 
-单个字符约 7 次请求，相比线性猜解显著减少请求量。
+1. 从 URL 或 `params_name` 确定候选参数；
+2. 对每个参数发送 `1=1` 与 `1=2`，两次采样取交集，排除动态内容；
+3. 找到“稳定且有区分度”的文字作为判断标志，并锁定注入参数。
+
+### 布尔盲注
+
+```sql
+ascii(substr((select group_concat(列) from 表), 位置, 1)) > mid
+```
+
+在 0~127 内二分：页面含标志说明条件为真，字符大于 `mid`；否则记录 `mid` 并向下收窄。
+
+### 列数探测
+
+`order by N` 在 `N` 不超过列数时正常返回，超过时报错。用二分找到最大的合法 `N`，即列数。
 
 ## 已知限制
 
-- 仅支持布尔盲注，暂不支持时间盲注与报错注入
+- 布尔盲注目前只支持 ASCII 0~127，暂不支持多字节字符
 - 需要已知表名与列名
 - 受 MySQL `group_concat_max_len` 限制，超长数据会被截断
-- 二分范围为 ASCII 0~127，暂不支持多字节字符
+- 列数探测需要页面有数据，`prefix` 要用有效 id
+- 尚未实现时间盲注、联合注入、报错注入
 
 ## 后续计划
 
 - [ ] 时间盲注模块
+- [ ] 联合注入模块
 - [ ] 报错注入模块
-- [ ] 更多 Web 漏洞检测模块
 
 ## 免责声明
 
