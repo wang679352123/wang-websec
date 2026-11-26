@@ -73,7 +73,7 @@ class UnionInjection(SQLInjection):
 
 if __name__ == "__main__":
     g = UnionInjection(
-        "http://localhost:8082/Less-11/?uname=&passwd&submit=Submit",
+        "http://localhost:{port}/Less-11/?uname=&passwd&submit=Submit",
         columns="password",
         prefix="admin'",
 
