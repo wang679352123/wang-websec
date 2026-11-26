@@ -14,7 +14,7 @@
     from Bool_sqli import BoolSQLi
 
     with BoolSQLi(
-        url="http://127.0.0.1:8082/Less-8/?id=1",
+        url="http://127.0.0.1:{port}/Less-8/?id=1",
         table_name="users",
         columns=["username", "password"],
         prefix="-1'",
